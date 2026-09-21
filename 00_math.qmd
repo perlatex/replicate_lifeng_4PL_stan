@@ -99,8 +99,53 @@ $$
 
 其中 `top`/`bottom` 为上/下平台，`IC50` 为半数抑制浓度，`hill` 为斜率。
 
+## 对数逻辑斯蒂：logistic 体现在哪里
 
-变量含义和取值范围:
+把模型里的 Hill 项改写成指数形式，令
+
+$$
+(x/\text{IC}_{50})^{\text{hill}} = e^{z}
+$$
+
+则模型变为
+
+$$
+f(x) = \text{bottom} + (\text{top}-\text{bottom})\cdot\frac{1}{1+e^{z}}
+$$
+
+
+这里的 $z$，可以通过对 $(x/\text{IC}_{50})^{\text{hill}} = e^{z}$ 两边取对数得到
+
+$$
+z = \text{hill}\cdot\ln\frac{x}{\text{IC}_{50}} = \text{hill}\,(\ln x - \ln\text{IC}_{50})
+$$
+
+
+
+所以，数学表达式可以重新写为
+
+$$
+\begin{aligned}
+y &= \text{bottom} + (\text{top} - \text{bottom})\,p  \\
+p &= \frac{1}{1 + e^{z}}, \qquad z = \text{hill}\,(\ln x - \ln\text{IC}_{50})
+\end{aligned}
+$$
+
+当然，也可以写为更好理解的形式
+
+$$
+\boxed{
+\begin{aligned}
+y &= \text{bottom} + (\text{top} - \text{bottom})\,p  \\
+\text{logit}(p) &= \ln\frac{p}{1-p} = \text{hill}\,(\ln\text{IC}_{50} - \ln x)
+\end{aligned}
+}
+$$
+
+"对数"指剂量走 $\ln x$，"逻辑斯蒂"指 $p$ 与 $\ln x$ 之间用 logit 相连。
+
+
+## 变量含义和取值范围
 
 - `bottom`：**下渐近线**，即浓度趋于无穷大时的响应（viability）。本数据中
   表示高剂量下的最低细胞活力，可以取负值（NLS 里 ent-Paroxol 为 -0.158）。
@@ -124,13 +169,15 @@ $$
 
 ```{r, eval=FALSE}
 fit_nls <- function(data) {
-  nls(viability ~ bottom + (top - bottom) / (1 + (conc_um / ec50)^hill),
-      data      = data,
-      start     = list(bottom = -0.2, top = 1, ec50 = 500, hill = 1),
-      lower     = c(bottom = -5, top = 0, ec50 = 1, hill = 0.05),
-      upper     = c(bottom = 1, top = 3, ec50 = 1e5, hill = 20),
-      algorithm = "port",
-      control   = list(maxiter = 1000))
+  nls(
+    viability ~ bottom + (top - bottom) / (1 + (conc_um / ec50)^hill),
+    data      = data,
+    start     = list(bottom = -0.2, top = 1, ec50 = 500, hill = 1),
+    lower     = c(bottom = -5, top = 0, ec50 = 1, hill = 0.05),
+    upper     = c(bottom = 1, top = 3, ec50 = 1e5, hill = 20),
+    algorithm = "port",
+    control   = list(maxiter = 1000)
+  )
 }
 ```
 
@@ -159,6 +206,7 @@ nls_coef |>
   select(compound, term, estimate, std.error) |>
   knitr::kable(digits = 3) |>
   kableExtra::kable_styling(font_size = 10)
+
 ```
 
 关键在 **ent-Paroxol 的 `bottom = -0.158`（负值）**，这使它的曲线在高浓度区

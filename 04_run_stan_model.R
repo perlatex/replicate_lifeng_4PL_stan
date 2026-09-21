@@ -67,7 +67,7 @@ stan_data <- list(
 ###############################################################################
 # ---- 2. Compile and sample ----
 model <- cmdstan_model("Stan/dose_response1.stan", pedantic = TRUE)
-model <- cmdstan_model("Stan/dose_response2.stan", pedantic = TRUE)
+# model <- cmdstan_model("Stan/dose_response2.stan", pedantic = TRUE)
 
 
 # 每条链用不同的 log_hill 初值以帮助探索.
