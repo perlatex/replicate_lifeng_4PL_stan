@@ -78,3 +78,49 @@ summary_data |>
         legend.justification = c(0, 0.5),
         legend.text = element_text(size = 11))
 
+
+
+
+##########################################################################
+# 用 marginaleffects 更容易懂
+library(marginaleffects)
+
+pred_data <- raw_data |>
+  group_nest(compound) |>
+  mutate(
+    mod = map(data, fit_4pl)
+  ) |> 
+  mutate(pred = map(mod, ~ predictions(.x, newdata = grid)) ) |>
+  select(compound, pred) |>
+  unnest(pred)
+
+
+summary_data |> 
+  ggplot(aes(x = conc_um, y = mean, colour = compound)) +
+  geom_line(data = pred_data, aes(y = estimate), linewidth = 0.8) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax),
+                width = 0.06, linewidth = 0.6) +
+  geom_point(size = 2.6) +
+  scale_x_log10(
+    breaks = c(10, 100, 1000),
+    labels = scales::label_log()
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 1.2, 0.2),
+    labels = scales::label_number(accuracy = 0.1),
+    expand = expansion(mult = c(0.01, 0.02))
+  ) +
+  scale_colour_manual(
+    values = c("ent-Paroxol"                    = "#4A98E0",
+               "3-Fluoro-5-hydroxybenzonitrile" = "#F47C7C")
+  ) +
+  coord_cartesian(xlim = c(4, 2200), ylim = c(0, 1.2)) +
+  labs(x = "Concentration/\u00b5M", y = "Cell Viability", colour = NULL) +
+  theme_test(base_size = 15) +
+  theme(axis.line = element_line(linewidth = 0.7),
+        axis.ticks = element_line(linewidth = 0.7),
+        axis.ticks.length = unit(4, "pt"),
+        legend.position = c(0.02, 0.14),
+        legend.justification = c(0, 0.5),
+        legend.text = element_text(size = 12))
+##########################################################################
