@@ -1,0 +1,566 @@
+---
+title: "复现 Nature Communications 图 4f：Hep G2 剂量–反应曲线"
+subtitle: "ent-Paroxol 与 3-Fluoro-5-hydroxybenzonitrile 的细胞毒性"
+date: today
+author: "wmj"
+format:
+  pdf:
+    documentclass: article
+    pdf-engine: xelatex
+    toc: true
+    df-print: kable
+    number-sections: true
+    geometry: margin=2.2cm
+    fontsize: 11pt
+    link-citations: true
+    colorlinks: true
+    linkcolor: red
+    urlcolor: red
+    include-in-header:
+      text: |
+        \usepackage{ctex}
+        \usepackage{fontspec}
+        \usepackage{booktabs}
+        \usepackage{longtable}
+        \usepackage{array}
+        \usepackage{float}
+        \usepackage{xcolor}
+        \usepackage{caption}
+execute:
+  eval: true    
+  echo: true
+  warning: false
+  message: false
+---
+
+# 背景
+
+本文复现 Chen 等（*Nat. Commun.* 2024, 15:8396）图 4f：用 CCK-8 法测得的
+Hep G2 细胞在两种候选污染物不同浓度下的存活率（cell viability），并拟合
+四参数对数逻辑斯蒂（4PL）剂量–反应曲线以估计 IC~50~。原文报告
+ent-Paroxol 的 $\text{IC}_{50}$ 为 494.4 $\mu\rm{M}$、3-Fluoro-5-hydroxybenzonitrile 为 545.9 $\mu\rm{M}$，每个浓度 6 个生物学重复，误差棒为标准差。
+
+
+```{r}
+library(tidyverse)
+library(minpack.lm)   # nlsLM：Levenberg–Marquardt，比 base nls 更稳健
+library(broom)
+library(cmdstanr)
+library(posterior)
+library(showtext)
+showtext_auto()
+```
+
+
+```{r}
+compound_levels <- c("ent-Paroxol", "3-Fluoro-5-hydroxybenzonitrile")
+
+raw_data <- read_csv("data/fig4f.csv") |>
+  mutate(compound = fct_relevel(compound, compound_levels))
+
+head(raw_data) |>
+  knitr::kable(digits = 3)
+```
+
+原始数据为长表：`compound`（化合物）、`conc_um`（浓度 $\mu\rm{M}$）、
+`replicate`（重复编号）、`viability`（存活率）。把化合物设为有序因子，
+使图例顺序与配色和原文一致（ent-Paroxol 在前）。
+
+
+# 汇总为 mean ± sd
+
+绘制的点与误差棒来自每个"化合物 × 浓度"组合的均值与标准差。
+`conc_um == 0` 是归一化对照（存活率恒为 1），无法置于对数横轴，
+仅在建模时保留、绘图时滤除。
+
+```{r}
+summary_data <- raw_data |>
+  filter(conc_um > 0) |>
+  group_by(compound, conc_um) |>
+  summarise(
+    mean = mean(viability),
+    sd   = sd(viability),
+    n    = n(),
+    .groups = "drop"
+  )
+
+summary_data |>
+  knitr::kable(digits = 3)
+```
+
+
+# 拟合 4PL 剂量–反应曲线
+
+采用四参数对数逻辑斯蒂模型
+
+$$
+f(x) = \text{bottom} + \frac{\text{top} - \text{bottom}}{1 + (x / \text{IC}_{50})^{\text{hill}}}
+$$
+
+其中 `top`/`bottom` 为上/下平台，`IC50` 为半数抑制浓度，`hill` 为斜率。
+
+
+变量含义和取值范围:
+
+- `bottom`：**下渐近线**，即浓度趋于无穷大时的响应（viability）。本数据中
+  表示高剂量下的最低细胞活力，可以取负值（NLS 里 ent-Paroxol 为 -0.158）。
+  取值范围 $(-\infty, \text{top})$，拟合时约束在 $[-5, 1]$。
+- `top`：**上渐近线**，即浓度为 0（对照/未处理）时的响应。CCK-8 归一化后
+  约等于 1。取值范围 $(\text{bottom}, \infty)$，拟合时约束在 $[0, 3]$。
+- `IC50`：**半数效应浓度**，即响应恰好落在 `top` 与 `bottom` 正中间
+  （$(\text{top}+\text{bottom})/2$）时所对应的浓度，单位 $\mu\rm{M}$。恒为正，
+  取值范围 $(0, \infty)$，拟合时约束在 $[1, 10^5]$。
+- `hill`：**Hill 斜率**，刻画曲线在 `ec50` 附近的陡峭程度（绝对值越大越陡）。
+  本参数化下取正值，对应抑制型（浓度升高响应下降）曲线。取值范围
+  $(0, \infty)$，拟合时约束在 $[0.05, 20]$。
+  
+  
+  
+
+
+# NLS 基准拟合
+
+用 base 的 `nls()` 的 port 算法，
+
+```{r, eval=FALSE}
+fit_nls <- function(data) {
+  nls(viability ~ bottom + (top - bottom) / (1 + (conc_um / ec50)^hill),
+      data      = data,
+      start     = list(bottom = -0.2, top = 1, ec50 = 500, hill = 1),
+      lower     = c(bottom = -5, top = 0, ec50 = 1, hill = 0.05),
+      upper     = c(bottom = 1, top = 3, ec50 = 1e5, hill = 20),
+      algorithm = "port",
+      control   = list(maxiter = 1000))
+}
+```
+
+
+也可以使用 `minpack::nlsLM()`
+```{r}
+fit_4pl <- function(data) {
+  nlsLM(
+    viability ~ bottom + (top - bottom) / (1 + (conc_um / ec50)^hill),
+    data = data,
+    start = list(bottom = -0.2, top = 1, ec50 = 500, hill = 1),
+    lower = c(bottom = -5, top = 0, ec50 = 1, hill = 0.05),
+    upper = c(bottom = 1, top = 3, ec50 = 1e5, hill = 20),
+    control = nls.lm.control(maxiter = 1000, ftol = 1e-10, ptol = 1e-10)
+  )
+}
+
+nls_coef <- raw_data |>
+  group_nest(compound) |>
+  mutate(mod = map(data, fit_4pl),
+         coef = map(mod, broom::tidy)) |>
+  select(compound, coef) |>
+  unnest(coef)
+
+nls_coef |>
+  select(compound, term, estimate, std.error) |>
+  knitr::kable(digits = 3) |>
+  kableExtra::kable_styling(font_size = 10)
+```
+
+关键在 **ent-Paroxol 的 `bottom = -0.158`（负值）**，这使它的曲线在高浓度区
+明显下探、与 3-Fluoro 拉开间距。
+拟合得到的 $\text{IC}_{50}$ 与原文几乎一致（3-Fluoro-5-hydroxybenzonitrile 约 546 $\mu\rm{M}$
+对 545.9 $\mu\rm{M}$；ent-Paroxol 约 500 $\mu\rm{M}$ 对 494.4 $\mu\rm{M}$），说明数据与模型选择都对得上。
+
+
+## 生成平滑拟合曲线
+
+在对数浓度范围内取密网格，对每个模型 `predict`，得到画线用的数据。
+
+```{r}
+grid <- tibble(conc_um = 10^seq(log10(5), log10(2000), length.out = 600))
+
+pred_data <- raw_data |>
+  group_nest(compound) |>
+  mutate(
+    mod = map(data, fit_4pl)
+  ) |> 
+  mutate(pred = map(mod, ~ mutate(grid, mean = predict(.x, newdata = grid)))) |>
+  select(compound, pred) |>
+  unnest(pred)
+```
+
+## 绘图
+
+```{r}
+#| label: fig-4f
+#| fig-width: 6.2
+#| fig-height: 5
+#| fig-cap: "复现图 4f：Hep G2 细胞存活率对化合物浓度的剂量–反应曲线（mean ± sd, n = 6）。"
+
+pal <- c(
+  "ent-Paroxol"                     = "#4A98E0",
+  "3-Fluoro-5-hydroxybenzonitrile"  = "#F47C7C"
+)
+
+summary_data |> 
+  ggplot(aes(x = conc_um, y = mean, colour = compound)) +
+  geom_line(data = pred_data, linewidth = 0.8) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd),
+                width = 0.06, linewidth = 0.6) +
+  geom_point(size = 2.6) +
+  scale_x_log10(
+    breaks = c(10, 100, 1000),
+    labels = scales::label_log()
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 1.2, 0.2),
+    labels = scales::label_number(accuracy = 0.1)
+  ) +
+  scale_colour_manual(values = pal) +
+  labs(x = "Concentration/\u00b5M", y = "Cell Viability", colour = NULL) +
+  theme_test(base_size = 15) +
+  theme(axis.line = element_line(linewidth = 0.7),
+        axis.ticks = element_line(linewidth = 0.7),
+        axis.ticks.length = unit(4, "pt"),
+        legend.position = c(0.02, 0.14),
+        legend.justification = c(0, 0.5),
+        legend.text = element_text(size = 11))
+```
+
+
+# 用 brms 拟合
+
+## 非线性公式
+
+这里，我们把 IC50 放在对数尺度 (exp(logic50)) 保证为正。
+
+```{r}
+library(brms)
+library(tidybayes)
+
+bform <- bf(
+  viability ~ bottom + (top - bottom) / (1 + (conc_um / exp(logic50))^hill),
+  bottom + top + logic50 + hill ~ 0 + compound,
+  sigma ~ 0 + compound,
+  nl = TRUE
+)
+
+bprior <- c(
+  prior(normal(0, 0.1),   nlpar = "bottom"),
+  prior(normal(1, 0.15),  nlpar = "top"),
+  prior(normal(6.21, 1),  nlpar = "logic50"),   # log(500) ≈ 6.21
+  prior(normal(1.5, 0.8), nlpar = "hill", lb = 0)
+)
+
+
+fit <- brm(bform,
+           data       = raw_data,
+           prior      = bprior,
+           backend    = "cmdstanr",
+           chains     = 4,
+           cores      = 4,
+           iter       = 2000,
+           seed       = 1024,
+           control    = list(adapt_delta = 0.98),
+           file       = "fits/brms_fit",
+           file_refit = "on_change")          # 公式或先验改动后自动重拟合
+
+```
+
+
+## 绘图
+
+后验拟合曲线: 每个化合物在浓度网格上取 add_epred_draws 的中位数 + 95% 区间。
+newdata 必须含模型两个预测变量 (conc_um, compound)。
+
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+#| fig-cap: "brms 后验中位数曲线"
+
+curve_data <- expand_grid(
+  conc_um  = 10^seq(log10(5), log10(2000), length.out = 300),
+  compound = factor(levels(raw_data$compound), levels = levels(raw_data$compound))
+) |>
+  tidybayes::add_epred_draws(fit) |>
+  tidybayes::median_qi(.epred, .width = 0.95) |>
+  ungroup()
+
+
+curve_data |> 
+  ggplot(aes(colour = compound)) +
+  geom_ribbon(
+    aes(x = conc_um, ymin = .lower, ymax = .upper, fill = compound),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(
+    aes(x = conc_um, y = .epred),
+    linewidth = 0.8
+  ) +
+  geom_errorbar(
+    data = summary_data,
+    aes(x = conc_um, ymin = mean - sd, ymax = mean + sd),
+    width = 0.06, linewidth = 0.6
+  ) +
+  geom_point(
+    data = summary_data,
+    aes(x = conc_um, y = mean),
+    size = 2.6
+  ) +
+  scale_x_log10(breaks = c(10, 100, 1000),
+                labels = scales::label_math(10^.x)(c(1, 2, 3)),
+                limits = c(4, 2200)) +
+  scale_y_continuous(breaks = seq(0, 1.2, 0.2), limits = c(0, 1.2),
+                     expand = expansion(mult = c(0.01, 0.02))) +
+  scale_colour_manual(values = pal) +
+  scale_fill_manual(values = pal) +
+  coord_cartesian(xlim = c(4, 2200), ylim = c(0, 1.2)) + # 只裁剪视图
+  labs(x = "Concentration/\u00b5M", y = "Cell Viability",
+       colour = NULL, fill = NULL) +
+  theme_classic(base_size = 15) +
+  theme(axis.line = element_line(linewidth = 0.7),
+        axis.ticks = element_line(linewidth = 0.7),
+        axis.ticks.length = unit(4, "pt"),
+        legend.position = c(0.02, 0.14),
+        legend.justification = c(0, 0.5),
+        legend.text = element_text(size = 11))
+```
+
+
+
+# 用 Stan 拟合
+
+先准备 Stan 需要的数据，包括先验。
+
+```text
+real<lower=0> prior_bottom_sd;  // bottom   ~ N(0, prior_bottom_sd)
+real<lower=0> prior_gap_sd;     // log_gap  ~ N(0, prior_gap_sd)
+real prior_hill_mu;             // log_hill ~ N(prior_hill_mu, prior_hill_sd)
+```
+
+  
+  
+```{r}
+dat <- raw_data |>
+  mutate(compound_id = as.integer(compound)) |>
+  arrange(compound_id, conc_um, replicate)
+
+grid <- crossing(compound_id = seq_along(compound_levels),
+                 conc_um = 10^seq(log10(5), log10(2000), length.out = 200)) |>
+  mutate(
+    compound = factor(compound_levels[compound_id], levels = compound_levels),
+    grid_id  = row_number()
+  )
+
+stan_data <- list(
+  N                  = nrow(dat), 
+  J                  = length(compound_levels),
+  compound           = dat$compound_id, 
+  concentration      = dat$conc_um, 
+  y                  = dat$viability,
+  M                  = nrow(grid), 
+  compound_grid      = grid$compound_id,
+  concentration_grid = grid$conc_um,
+  
+  prior_bottom_sd    = 0.2, 
+  prior_gap_sd       = 0.25,
+  prior_hill_mu      = log(1.5), 
+  prior_hill_sd      = 0.8
+)
+
+model <- cmdstan_model("Stan/dose_response_compare.stan", quiet = TRUE)
+
+fit <- model$sample(
+  data            = stan_data, 
+  seed            = 1024, 
+  chains          = 4, 
+  parallel_chains = 4,
+  iter_warmup     = 1000, 
+  iter_sampling   = 1000, 
+  adapt_delta     = 0.95,
+  max_treedepth   = 12,
+  refresh         = 0
+)
+```
+
+```{r}
+fit$summary(c("bottom", "top", "ec50", "hill")) |>
+  select(variable, mean, median, sd) |>
+  knitr::kable(digits = 3)
+```
+
+# 用 Stan 拟合，放宽先验
+
+把 `bottom` 的先验从 `normal(0, 0.2)` 放宽为 `normal(0, 1)`（近似平坦），
+其余也作调整。目的是想检验先验收缩是不是导致 ent-Paroxol 蓝线被拉高的主因。
+
+```{r}
+stan_data <- list(
+  N                  = nrow(dat), 
+  J                  = length(compound_levels),
+  compound           = dat$compound_id, 
+  concentration      = dat$conc_um, 
+  y                  = dat$viability,
+  M                  = nrow(grid), 
+  compound_grid      = grid$compound_id,
+  concentration_grid = grid$conc_um,
+  
+  prior_bottom_sd    = 1, 
+  prior_gap_sd       = 1,
+  prior_hill_mu      = 0, 
+  prior_hill_sd      = 1.5
+)
+
+
+fit_wide  <- model$sample(
+  data            = stan_data, 
+  seed            = 1024, 
+  chains          = 4, 
+  parallel_chains = 4,
+  iter_warmup     = 1000, 
+  iter_sampling   = 1000, 
+  adapt_delta     = 0.95,
+  max_treedepth   = 12,
+  refresh         = 0
+)
+```
+
+
+```{r}
+fit_wide$summary(c("bottom", "top", "ec50", "hill")) |>
+  select(variable, mean, median, sd) |>
+  knitr::kable(digits = 3)
+```
+
+
+# 参数对比
+
+```{r}
+#| label: tbl-param
+#| tbl-cap: "NLS 点估计 vs Stan 后验中位数（ent-Paroxol / 3-Fluoro）"
+
+nls_wide <- nls_coef |>
+  select(compound, term, estimate) |>
+  pivot_wider(names_from = term, values_from = estimate)
+
+stan_median <- function(fitobj) {
+  fitobj$summary(c("bottom", "top", "ec50", "hill")) |>
+    dplyr::select(variable, median) |>
+    mutate(compound_id = as.integer(str_extract(variable, "(?<=\\[)\\d")),
+           term = str_remove(variable, "\\[\\d\\]")   ) |>
+    mutate(compound = factor(compound_levels[compound_id], levels = compound_levels)) |>
+    dplyr::select(compound, term, median) |>
+    pivot_wider(names_from = term, values_from = median) |>
+    select(compound, bottom, top, ec50, hill)
+}
+
+bind_rows(
+  nls_wide |> mutate(method = "NLS"),
+  stan_median(fit)      |> mutate(method = "Stan 原先验"),
+  stan_median(fit_wide) |> mutate(method = "Stan 放宽 bottom")
+) |>
+  relocate(method, compound) |>
+  knitr::kable(digits = 3)
+```
+
+
+
+观察：NLS 里 ent-Paroxol 的 `bottom = -0.158`，Stan 后验中位数只有约 -0.05
+至 -0.07；放宽 bottom 先验后恢复到约 -0.07，仍与 NLS 有明显差异。
+同时 ent-Paroxol 的 `hill` 从 NLS 的 1.53 变成后验的 2.3–2.6，且后验很宽
+（sd 约 1.8），说明该参数弱识别。
+
+## 曲线间距对比
+
+两条拟合线（ent-Paroxol 蓝、3-Fluoro 红）在网格点上的拟合值之差，
+取若干浓度点的绝对值。
+
+```{r}
+nls_curve <- map_dfr(compound_levels, function(cc) {
+  m <- fit_4pl(filter(raw_data, compound == cc))
+  g <- grid |>
+    filter(compound_id == which(compound_levels == cc)) |>
+    mutate(compound = factor(cc, levels = compound_levels))
+  g |> mutate(fit = predict(m, newdata = g))
+})
+
+post_curve <- function(fitobj) {
+  mu <- fitobj$draws("mu_grid")
+  med <- apply(mu, 3, median)
+  grid |> mutate(median_fit = as.numeric(med)) 
+}
+
+cur_tight <- post_curve(fit)
+cur_wide  <- post_curve(fit_wide)
+```
+
+
+网格为对数等距，取最接近目标浓度的点
+
+```{r}
+#| label: tbl-gap
+#| tbl-cap: "两条拟合线的间距（拟合值之差，绝对值）"
+
+targets <- c(100, 500, 1000, 1500, 2000)
+nn <- sapply(targets, function(t) which.min(abs(grid$conc_um[1:200] - t)))
+
+gap_nls   <- function(i) abs(nls_curve$fit[i] - nls_curve$fit[i + 200])
+gap_tight <- function(i) abs(cur_tight$median_fit[i] - cur_tight$median_fit[i + 200])
+gap_wide  <- function(i) abs(cur_wide$median_fit[i]  - cur_wide$median_fit[i + 200])
+
+tibble(
+  target_conc = targets,
+  grid_conc   = grid$conc_um[nn],
+  NLS         = sapply(nn, gap_nls),
+  Stan_原先验  = sapply(nn, gap_tight),
+  Stan_放宽bottom = sapply(nn, gap_wide)
+) |>
+  knitr::kable(digits = 3)
+```
+
+放宽先验能拉开一点，但不足以完全恢复 NLS 的间距（例如 100 $\mu\rm{M}$ 处
+NLS 0.102 → 放宽后 0.064）。
+
+## 曲线叠加图
+
+```{r}
+#| fig-cap: "NLS 与 Stan 后验中位数曲线的叠加对比"
+#| fig-width: 8
+#| fig-height: 5
+
+
+allcurves <- bind_rows(
+  nls_curve |> mutate(method = "NLS"),
+  cur_tight |> rename(fit = median_fit) |> mutate(method = "Stan 原先验"),
+  cur_wide  |> rename(fit = median_fit) |> mutate(method = "Stan 放宽bottom")
+)
+
+allcurves |> 
+  ggplot(aes(conc_um, fit, colour = compound, linetype = method)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(data = summary_data, aes(conc_um, mean), inherit.aes = FALSE) +
+  scale_x_log10() +
+  scale_colour_manual(values = pal) +
+  labs(x = "Concentration (µM)", y = "Viability",
+       colour = NULL, linetype = "拟合方法") +
+  theme_bw(base_size = 13)
+```
+
+## 收敛诊断
+
+```{r}
+#| label: tbl-diag
+#| tbl-cap: "Stan 拟合的收敛诊断（原先验）"
+
+fit$summary(c("bottom", "top", "ec50", "hill", "sigma")) |>
+  select(variable, mean, median, rhat, ess_bulk) |>
+  knitr::kable(digits = 3)
+```
+
+$R^{hat} \approx 1.00$、ESS 充足，说明链已收敛——因此差异**不是**采样/初始值问题，而是先验 + 后验本身。
+
+## 小结
+
+放宽先验只能部分恢复间距。`bottom` 是弱识别的外推参数，
+数据并不能强区分 `bottom = -0.158` 与 `bottom = -0.05`。因此：
+
+- 若目标是**严格复现原图**：原图几乎肯定是 NLS 拟合，保留 `01_run_nls_model.R`；
+- 若目标是 **Bayesian 分析**：放宽先验后接受曲线与 NLS 的差异是合理的，
+  用后验区间呈现不确定性，不必强求与 NLS 完全重合。
+
+
